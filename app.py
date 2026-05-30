@@ -7,8 +7,10 @@ from geopy.geocoders import Nominatim
 import math
 import numpy as np
 import io
+import folium
+from streamlit_folium import st_folium
 
-# Lista de países en español y sus equivalentes en inglés para Nominatim
+# Mapeo de países comunes en español a inglés
 PAISES = {
     "Perú": "Peru",
     "Colombia": "Colombia",
@@ -33,79 +35,73 @@ PAISES = {
     "Estados Unidos": "United States",
     "Canadá": "Canada",
     "Brasil": "Brazil",
-    "Portugal": "Portugal",
-    "Francia": "France",
-    "Italia": "Italy",
-    "Alemania": "Germany",
-    "Reino Unido": "United Kingdom",
-    "Japón": "Japan",
-    "China": "China",
-    "Australia": "Australia",
-    "Otros (Búsqueda Manual)": "manual"
+    "Sudamérica": "South America",
+    "Centroamérica": "Central America",
+    "Norteamérica": "North America",
+    "Europa": "Europe",
+    "Búsqueda Libre (Cualquier lugar, ciudad o región)": "manual"
 }
 
-# Constantes de URL y archivos
-EGM2008_URL = "https://s3-eu-west-1.amazonaws.com/download.agisoft.com/gtg/us_nga_egm2008_1.tif"
+# Resoluciones
+RESOLUCIONES = {
+    "1' (Alta precisión - 1 Minuto de arco)": {
+        "url": "https://s3-eu-west-1.amazonaws.com/download.agisoft.com/gtg/us_nga_egm2008_1.tif",
+        "file": "us_nga_egm2008_1.tif"
+    },
+    "2.5' (Mediana precisión - 2.5 Minutos de arco)": {
+        "url": "https://s3-eu-west-1.amazonaws.com/download.agisoft.com/gtg/us_nga_egm2008_25.tif",
+        "file": "us_nga_egm2008_25.tif"
+    }
+}
+
 DATA_DIR = "data"
-EGM_FILE = os.path.join(DATA_DIR, "us_nga_egm2008_1.tif")
 
-st.set_page_config(page_title="Descargador de Geoide", page_icon="🌍")
+st.set_page_config(page_title="DESCARGA TU GEOIDE EGM2008", page_icon="🌍", layout="wide")
 
-st.title("🌍 Descargador de Geoide EGM2008 de Alta Resolución (1')")
-st.write("Esta herramienta recorta el modelo global de geoide EGM2008 (1 minuto de arco) para la zona del país seleccionado en el formato de tu elección.")
+st.title("DESCARGA TU GEOIDE EGM2008")
+st.write("Herramienta para recortar y descargar el modelo de geoide EGM2008 para cualquier país, ciudad, continente o zona personalizada.")
 
 # Asegurar que existe la carpeta data
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
-# Función para descargar el archivo global
-@st.cache_resource(show_spinner=False)
-def download_global_geoid():
-    if not os.path.exists(EGM_FILE):
-        st.info("El archivo global EGM2008 de 1' (aprox. 420 MB) no se encontró. Descargándolo (esto solo se hace una vez)...")
-        response = requests.get(EGM2008_URL, stream=True)
-        total_size_in_bytes = int(response.headers.get('content-length', 0))
-        block_size = 1024 * 1024 # 1 Megabyte
-        
-        progress_bar = st.progress(0)
-        downloaded = 0
-        
-        with open(EGM_FILE, 'wb') as file:
-            for data in response.iter_content(block_size):
-                downloaded += len(data)
-                file.write(data)
-                if total_size_in_bytes > 0:
-                    progress = int(100 * downloaded / total_size_in_bytes)
-                    progress_bar.progress(progress if progress <= 100 else 100)
-        
-        progress_bar.empty()
-        st.success("Descarga del modelo global de 1' completada.")
-    return True
+# Estado del sistema (Permanente y discreto)
+st.success("🟢 Aplicativo activo y funcional")
 
-# Función para obtener el bounding box de un país
-def get_country_bbox(country_name):
-    geolocator = Nominatim(user_agent="geoid_downloader_app_v2")
+# Función para descargar el archivo global de forma silenciosa
+def ensure_base_geoid(res_config):
+    filepath = os.path.join(DATA_DIR, res_config["file"])
+    if not os.path.exists(filepath):
+        with st.spinner("Descargando base de datos del geoide global por primera vez. Por favor, espere..."):
+            response = requests.get(res_config["url"], stream=True)
+            with open(filepath, 'wb') as file:
+                for data in response.iter_content(1024 * 1024):
+                    file.write(data)
+    return filepath
+
+# Función para obtener el bounding box de cualquier consulta
+def get_location_bbox(query):
+    geolocator = Nominatim(user_agent="geoid_downloader_app_v3")
     try:
-        location = geolocator.geocode({"country": country_name}, exactly_one=True)
+        location = geolocator.geocode(query, exactly_one=True)
         if location and location.raw.get('boundingbox'):
             bbox = location.raw['boundingbox']
             # Convertir a: [lon_min, lat_min, lon_max, lat_max]
-            return (float(bbox[2]), float(bbox[0]), float(bbox[3]), float(bbox[1]))
+            return (float(bbox[2]), float(bbox[0]), float(bbox[3]), float(bbox[1])), location.address
     except Exception as e:
         st.error(f"Error al buscar coordenadas: {e}")
-    return None
+    return None, None
 
-def crop_geoid(bbox, output_filename, format_type):
+def crop_geoid(base_file, bbox, output_filename, format_type):
     lon_min, lat_min, lon_max, lat_max = bbox
     
-    # Expandir el bounding box ligeramente para asegurar cobertura completa
-    lon_min -= 0.5
-    lat_min -= 0.5
-    lon_max += 0.5
-    lat_max += 0.5
+    # Margen extra
+    lon_min -= 0.1
+    lat_min -= 0.1
+    lon_max += 0.1
+    lat_max += 0.1
     
-    with rasterio.open(EGM_FILE) as src:
-        # Calcular la ventana
+    with rasterio.open(base_file) as src:
         window_raw = from_bounds(lon_min, lat_min, lon_max, lat_max, src.transform)
         
         col_off = max(0, math.floor(window_raw.col_off))
@@ -120,11 +116,9 @@ def crop_geoid(bbox, output_filename, format_type):
         out_transform = src.window_transform(window)
         
         if format_type == "XYZ (Texto Plano/Excel)":
-            # Generar coordenadas X e Y para cada celda
             rows, cols = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
             xs, ys = rasterio.transform.xy(out_transform, rows, cols)
             
-            # Aplanar los arreglos para guardarlos en formato columna (Lon, Lat, Altura)
             points = np.stack([np.array(xs).flatten(), np.array(ys).flatten(), data.flatten()], axis=1)
             
             s = io.StringIO()
@@ -132,7 +126,6 @@ def crop_geoid(bbox, output_filename, format_type):
             with open(output_filename, "wb") as f:
                 f.write(s.getvalue().encode('utf-8'))
         else:
-            # Seleccionar el driver de GDAL
             driver_name = "GTX"
             if format_type == "GeoTIFF (Raster Estándar)":
                 driver_name = "GTiff"
@@ -150,75 +143,105 @@ def crop_geoid(bbox, output_filename, format_type):
             with rasterio.open(output_filename, "w", **out_meta) as dest:
                 dest.write(data, 1)
 
-# Descargar modelo base en segundo plano si no existe
-try:
-    download_global_geoid()
-except Exception as e:
-    st.error(f"Error al descargar el geoide global: {e}")
+# --- DISEÑO DE COLUMNAS DE LA APLICACIÓN ---
+col1, col2 = st.columns([1, 1])
 
-# Formulario y Selección en la UI
-paises_disponibles = list(PAISES.keys())
-pais_seleccionado = st.selectbox("Selecciona un país:", paises_disponibles)
-
-# Entrada manual si elige "Otros"
-if pais_seleccionado == "Otros (Búsqueda Manual)":
-    pais_busqueda = st.text_input("Ingresa el nombre del país en inglés (ej. Canada, Japan, Peru):")
-else:
-    pais_busqueda = PAISES[pais_seleccionado]
-
-# Selección de formato de salida
-formatos = [
-    "GTX (VDatum)",
-    "GeoTIFF (Raster Estándar)",
-    "BYN (Formato Surveying)",
-    "XYZ (Texto Plano/Excel)"
-]
-formato_seleccionado = st.selectbox("Selecciona el formato de descarga:", formatos)
-
-# Mapear extensiones de archivo
-extensiones = {
-    "GTX (VDatum)": "gtx",
-    "GeoTIFF (Raster Estándar)": "tif",
-    "BYN (Formato Surveying)": "byn",
-    "XYZ (Texto Plano/Excel)": "xyz"
-}
-ext = extensiones[formato_seleccionado]
-
-if st.button("Generar y Descargar"):
-    if pais_busqueda:
-        nombre_pais_limpio = pais_seleccionado if pais_seleccionado != "Otros (Búsqueda Manual)" else pais_busqueda
-        with st.spinner(f"Buscando límites geográficos para {nombre_pais_limpio}..."):
-            bbox = get_country_bbox(pais_busqueda)
-            
-        if bbox:
-            st.success(f"Coordenadas encontradas para {nombre_pais_limpio}: Longitud [{bbox[0]:.2f} a {bbox[2]:.2f}], Latitud [{bbox[1]:.2f} a {bbox[3]:.2f}]")
-            
-            nombre_archivo = f"{nombre_pais_limpio.replace(' ', '_').lower()}_geoid.{ext}"
-            output_file = os.path.join(DATA_DIR, nombre_archivo)
-            
-            with st.spinner(f"Generando archivo en formato {formato_seleccionado}..."):
-                try:
-                    crop_geoid(bbox, output_file, formato_seleccionado)
-                    st.success("¡Recorte y conversión exitosa!")
-                    
-                    with open(output_file, "rb") as file:
-                        st.download_button(
-                            label=f"⬇️ Descargar {nombre_archivo}",
-                            data=file,
-                            file_name=nombre_archivo,
-                            mime="application/octet-stream"
-                        )
-                except Exception as e:
-                    st.error(f"Error al procesar el archivo. El formato seleccionado podría no ser soportado por la versión de GDAL en el servidor. Detalles: {e}")
-        else:
-            st.error("No se pudo encontrar el país seleccionado. Intenta con búsqueda manual en inglés.")
+with col1:
+    st.subheader("Configuración de Descarga")
+    
+    # 1. Selección de Resolución
+    res_key = st.radio("Selecciona la resolución del geoide:", list(RESOLUCIONES.keys()))
+    res_config = RESOLUCIONES[res_key]
+    
+    # Asegurar el archivo base
+    base_file = ensure_base_geoid(res_config)
+    
+    # 2. Selección de Zona / Localidad
+    paises_disponibles = list(PAISES.keys())
+    pais_seleccionado = st.selectbox("Selecciona un país, región o continente:", paises_disponibles)
+    
+    if pais_seleccionado == "Búsqueda Libre (Cualquier lugar, ciudad o región)":
+        consulta_busqueda = st.text_input("Ingresa el lugar que buscas (ej: Tacna, Lima, Buenos Aires, Sudamérica):", value="Tacna, Peru")
     else:
-        st.warning("Por favor ingresa un nombre para la búsqueda.")
+        consulta_busqueda = pais_seleccionado
+    
+    # Obtener coordenadas del área seleccionada
+    bbox, direccion_completa = get_location_bbox(consulta_busqueda)
+    
+    # 3. Selección de formato de salida
+    formatos = [
+        "GTX (VDatum)",
+        "GeoTIFF (Raster Estándar)",
+        "BYN (Formato Surveying)",
+        "XYZ (Texto Plano/Excel)"
+    ]
+    formato_seleccionado = st.selectbox("Selecciona el formato de archivo de salida:", formatos)
+    
+    extensiones = {
+        "GTX (VDatum)": "gtx",
+        "GeoTIFF (Raster Estándar)": "tif",
+        "BYN (Formato Surveying)": "byn",
+        "XYZ (Texto Plano/Excel)": "xyz"
+    }
+    ext = extensiones[formato_seleccionado]
+
+with col2:
+    st.subheader("Visualización del Área de Recorte")
+    if bbox:
+        lon_min, lat_min, lon_max, lat_max = bbox
+        centro_lat = (lat_min + lat_max) / 2
+        centro_lon = (lon_min + lon_max) / 2
+        
+        st.write(f"📍 **Ubicación encontrada:** {direccion_completa}")
+        st.write(f"📐 **Límites:** Latitud [{lat_min:.4f} a {lat_max:.4f}] | Longitud [{lon_min:.4f} a {lon_max:.4f}]")
+        
+        # Crear mapa folium interactivo
+        m = folium.Map(location=[centro_lat, centro_lon], zoom_start=4)
+        
+        # Dibujar rectángulo del área de recorte
+        folium.Rectangle(
+            bounds=[[lat_min, lon_min], [lat_max, lon_max]],
+            color="#FF0000",
+            fill=True,
+            fill_color="#FF0000",
+            fill_opacity=0.2,
+            popup="Zona de Recorte"
+        ).add_to(m)
+        
+        # Ajustar el mapa al rectángulo
+        m.fit_bounds([[lat_min, lon_min], [lat_max, lon_max]])
+        
+        # Renderizar mapa en streamlit
+        st_folium(m, width="100%", height=350, returned_objects=[])
+    else:
+        st.warning("Escribe una ubicación válida para verla en el mapa.")
+
+# --- BOTÓN DE PROCESAMIENTO Y DESCARGA ---
+st.markdown("---")
+if bbox:
+    nombre_archivo = f"{consulta_busqueda.replace(' ', '_').replace(',', '').lower()}_geoid.{ext}"
+    output_path = os.path.join(DATA_DIR, nombre_archivo)
+    
+    if st.button("Generar y Descargar Archivo"):
+        with st.spinner("Procesando y recortando geoide..."):
+            try:
+                crop_geoid(base_file, bbox, output_path, formato_seleccionado)
+                st.success("¡Procesamiento exitoso!")
+                
+                with open(output_path, "rb") as file:
+                    st.download_button(
+                        label=f"⬇️ Descargar {nombre_archivo}",
+                        data=file,
+                        file_name=nombre_archivo,
+                        mime="application/octet-stream"
+                    )
+            except Exception as e:
+                st.error(f"Error al generar el archivo. El formato seleccionado podría no ser compatible con el servidor. Detalles: {e}")
 
 # Créditos al pie de la página
 st.markdown("---")
 st.markdown(
-    "<p style='text-align: center; color: #888888; font-weight: bold; margin-top: 50px;'>"
+    "<p style='text-align: center; color: #888888; font-weight: bold; margin-top: 30px;'>"
     "Diseñado para fines educativos por:<br>"
     "<span style='color: #4A90E2; font-size: 1.1em;'>Omar Cutimbo Ticona</span><br>"
     "TACNA - PERÚ"

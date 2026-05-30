@@ -2,3 +2,6 @@ streamlit
 geopy
 rasterio
 requests
+numpy
+folium
+streamlit-folium
